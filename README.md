@@ -1,18 +1,25 @@
 # AI Study Coach
 
 An agentic study coach built with LangChain + LangGraph, as a learning project.
-Upload lecture slides (PDF) and it generates a structured summary and/or
-detailed notes. Flashcards, quizzes, and adaptive weak-topic tracking are
-in progress.
+Upload lecture slides (PDF) and it generates a summary, detailed notes,
+flashcards, and a quiz — then grades your answers, tracks which topics
+you're weak on, and adaptively re-quizzes you on just those topics. Weak
+topics persist across separate runs (via a LangGraph checkpointer), so
+running "quiz me" again tomorrow remembers what you struggled with today.
 
-## Current pipeline (Stage 1)
+## Pipeline
 
 ```
-read_pdf → [decision: mode] → summarize → [decision: mode] → make_notes
+read_pdf → [optional: summarize] → [optional: make_notes]
+         → [optional: flashcards] → [optional: quiz]
+
+quiz → ask_answers → evaluate → (loop back to quiz if weak topics remain,
+                                  up to 2 retry rounds) → end
 ```
 
-`mode` (`summary` / `notes` / `both`) controls which nodes actually run,
-via LangGraph conditional edges — no code editing required between runs.
+Which steps run is controlled entirely at runtime (no code edits) via a
+comma-separated `steps` argument: `summary`, `notes`, `flashcards`, `quiz`,
+in any combination. LangGraph conditional edges decide the routing.
 
 ## Setup
 
@@ -20,21 +27,31 @@ via LangGraph conditional edges — no code editing required between runs.
 python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env             # paste your GOOGLE_API_KEY (or swap to Anthropic, see nodes.py)
 ```
+
+Currently configured to run on a **local Ollama model** (`qwen2.5:7b`) —
+no API key needed, just make sure Ollama is running. To swap to Claude or
+Gemini instead, see the top of `nodes.py` (`.env.example` has both key
+formats ready).
 
 ## Run
 
 ```bash
 python run_stage1.py path/to/your_lecture.pdf summary
-python run_stage1.py path/to/your_lecture.pdf notes
-python run_stage1.py path/to/your_lecture.pdf both
+python run_stage1.py path/to/your_lecture.pdf notes,flashcards
+python run_stage1.py path/to/your_lecture.pdf quiz
+python run_stage1.py path/to/your_lecture.pdf summary,notes,flashcards,quiz
 ```
 
-## Roadmap
-- [x] Stage 1: read PDF → summarize → notes, with conditional routing
-- [ ] Stage 2: flashcards + quiz generation (structured output)
-- [ ] Stage 3: evaluate answers, track weak topics in state
-- [ ] Stage 4: persist state across sessions (checkpointing) so "quiz me"
-      adapts to weak chapters from previous runs — the core agentic/memory piece
+Each PDF gets its own memory "thread" (by filename) — run the same PDF
+with `quiz` again later, and it'll pick up right where your weak topics
+left off.
 
+## Roadmap
+- [x] Stage 1: read PDF → summarize / notes, conditional routing
+- [x] Stage 2: flashcards + quiz generation (structured output via Pydantic)
+- [x] Stage 3: evaluate answers (LLM-as-judge), track weak topics, adaptive
+      retry loop (the core agentic control-flow piece)
+- [x] Stage 4: persist state across sessions (SQLite checkpointer) — "quiz
+      me" remembers weak chapters from previous runs
+- [ ] Next: a simple frontend for easier testing/demoing

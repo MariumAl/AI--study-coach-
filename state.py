@@ -14,13 +14,17 @@ but they'll stay empty until we build the nodes that fill them.
 
 from typing import TypedDict, List, Literal
 
+Step = Literal["summary", "notes", "flashcards", "quiz"]
+
 
 class CoachState(TypedDict):
     file_path: str          # input: path to the lecture PDF
-    mode: Literal["summary", "notes", "both"]  # input: what to generate this run
+    steps: List[Step]        # input: which outputs to generate this run, any combo
     raw_text: str            # filled by read_pdf node
-    summary: str             # filled by summarize node (empty if mode="notes")
-    notes: str               # filled by make_notes node (empty if mode="summary")
-    flashcards: List[dict]   # Stage 2
-    quiz: List[dict]         # Stage 2
-    weak_topics: List[str]   # Stage 3 — this is the "memory" part
+    summary: str             # filled by summarize node (only if "summary" in steps)
+    notes: str               # filled by make_notes node (only if "notes" in steps)
+    flashcards: List[dict]   # filled by flashcards node (only if "flashcards" in steps)
+    quiz: List[dict]         # filled by quiz node (only if "quiz" in steps)
+    answers: List[str]       # filled by ask_answers node — student's typed answers
+    weak_topics: List[str]   # filled by evaluate node — topics the student got wrong
+    retry_round: int         # how many times we've looped back for more practice

@@ -10,12 +10,17 @@ python shell, no graph required).
 """
 
 import os
+from typing import List
+from pydantic import BaseModel, Field
 from pypdf import PdfReader
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 from state import CoachState
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+# No API key needed — this talks to Ollama's local server (default
+# http://localhost:11434). Make sure Ollama is running before you invoke
+# the graph, or you'll get a connection error, not an auth error.
+llm = ChatOllama(model="qwen2.5:7b", temperature=0)
 
 
 def read_pdf(state: CoachState) -> dict:
@@ -74,3 +79,174 @@ def make_notes(state: CoachState) -> dict:
     response = llm.invoke(messages)
     print("[make_notes] done")
     return {"notes": response.content}
+
+
+# --- Structured output: flashcards -------------------------------------
+# Instead of asking for free text and hoping it looks like flashcards, we
+# describe the EXACT shape we want as a Pydantic model. LangChain then
+# constrains the model's output to match this schema and parses it back
+# into real Python objects (Flashcard instances), not a string.
+
+class Flashcard(BaseModel):
+    topic: str = Field(description="Short topic/chapter this card belongs to")
+    question: str = Field(description="The question side of the flashcard")
+    answer: str = Field(description="The answer side of the flashcard")
+
+
+class FlashcardSet(BaseModel):
+    flashcards: List[Flashcard]
+
+
+# .with_structured_output() returns a NEW runnable that behaves like the
+# model but guarantees its output matches the schema above.
+flashcard_llm = llm.with_structured_output(FlashcardSet)
+
+FLASHCARD_SYSTEM_PROMPT = """You are a study coach creating flashcards from \
+lecture slides. Create one flashcard per distinct fact, definition, or \
+concept — enough to cover everything a student needs to memorize for an \
+exam. Questions should be specific and testable, not vague ("What is X?" \
+is fine; "Tell me about the lecture" is not). Only use content from the \
+source material."""
+
+
+def make_flashcards(state: CoachState) -> dict:
+    messages = [
+        SystemMessage(content=FLASHCARD_SYSTEM_PROMPT),
+        HumanMessage(content=f"LECTURE CONTENT:\n{state['raw_text']}"),
+    ]
+    result: FlashcardSet = flashcard_llm.invoke(messages)
+    print(f"[make_flashcards] generated {len(result.flashcards)} flashcards")
+    # Convert Pydantic objects to plain dicts to store in state (state is a
+    # TypedDict of plain Python types — keep it simple/serializable).
+    return {"flashcards": [card.model_dump() for card in result.flashcards]}
+
+
+# --- Structured output: quiz ---------------------------------------------
+# Same pattern as flashcards, but a quiz question needs a correct_answer
+# field — this is what the (not-yet-built) evaluator will compare the
+# student's typed answer against.
+
+class QuizQuestion(BaseModel):
+    topic: str = Field(description="Short topic/chapter this question tests")
+    question: str = Field(description="The quiz question text")
+    correct_answer: str = Field(
+        description="A concise correct answer, used to grade the student's response"
+    )
+
+
+class QuizSet(BaseModel):
+    questions: List[QuizQuestion]
+
+
+quiz_llm = llm.with_structured_output(QuizSet)
+
+QUIZ_SYSTEM_PROMPT = """You are a study coach creating quiz questions from \
+lecture slides. Each question needs a concise, gradable correct_answer (a \
+sentence or two, not an essay). Only use content from the source material."""
+
+
+def make_quiz(state: CoachState) -> dict:
+    weak_topics = state.get("weak_topics") or []
+
+    if weak_topics:
+        # Retry round: focus narrowly on what the student got wrong, instead
+        # of a fresh quiz on everything. This is the "adaptive" part — the
+        # prompt itself changes based on what the graph has learned so far.
+        topic_list = ", ".join(weak_topics)
+        instruction = (
+            f"The student struggled with these specific topics: {topic_list}. "
+            f"Create 3-4 NEW questions (not repeats) that specifically retest "
+            f"understanding of these topics. Do not cover anything else."
+        )
+        print(f"[make_quiz] adaptive round — focusing on: {topic_list}")
+    else:
+        instruction = (
+            "Create 5-8 questions covering the most important concepts — mix "
+            "definition questions (\"What is X?\") with applied ones (\"Why "
+            "does X happen?\" or \"What would happen if...?\")."
+        )
+        print("[make_quiz] initial quiz — covering all topics")
+
+    messages = [
+        SystemMessage(content=QUIZ_SYSTEM_PROMPT),
+        HumanMessage(
+            content=f"{instruction}\n\nLECTURE CONTENT:\n{state['raw_text']}"
+        ),
+    ]
+    result: QuizSet = quiz_llm.invoke(messages)
+    print(f"[make_quiz] generated {len(result.questions)} quiz questions")
+    return {"quiz": [q.model_dump() for q in result.questions]}
+
+
+def ask_answers(state: CoachState) -> dict:
+    """Collect the student's typed answers, one per quiz question.
+
+    This node uses plain input() — it just pauses the Python process and
+    waits for terminal input, same as any script would. This is fine for
+    a CLI learning project. Production chat apps use LangGraph's proper
+    human-in-the-loop mechanism (`interrupt()` + a checkpointer) instead,
+    which pauses a graph run and resumes it later, possibly across a
+    network request — worth knowing that exists, not needed here.
+    """
+    print("\n--- QUIZ TIME ---")
+    answers = []
+    for i, q in enumerate(state["quiz"], start=1):
+        print(f"\n{i}. [{q['topic']}] {q['question']}")
+        answer = input("Your answer: ")
+        answers.append(answer)
+    return {"answers": answers}
+
+
+class Grade(BaseModel):
+    correct: bool = Field(description="Whether the student's answer is substantively correct")
+    feedback: str = Field(description="One sentence of feedback, especially if wrong")
+
+
+grade_llm = llm.with_structured_output(Grade)
+
+GRADE_SYSTEM_PROMPT = """You are grading a student's quiz answer. Judge \
+based on MEANING, not exact wording — "hash map" and "hash table" should \
+both count as correct if the question is about that concept. Be reasonably \
+lenient: partial understanding of the core idea counts as correct. Only \
+mark it wrong if the core concept is actually missing or incorrect."""
+
+
+def evaluate(state: CoachState) -> dict:
+    """Grade every answer, and collect which TOPICS the student got wrong.
+    This is the state that turns into 'memory' for the adaptive loop —
+    make_quiz reads weak_topics on the next round to decide what to retest.
+    """
+    weak_topics = []
+    correct_count = 0
+
+    for q, student_answer in zip(state["quiz"], state["answers"]):
+        # Don't trust the LLM to correctly handle a trivial edge case like an
+        # empty answer — decide that deterministically in plain Python first.
+        if not student_answer.strip():
+            weak_topics.append(q["topic"])
+            print(f"  ✗ [{q['topic']}] No answer provided.")
+            continue
+
+        messages = [
+            SystemMessage(content=GRADE_SYSTEM_PROMPT),
+            HumanMessage(content=(
+                f"Question: {q['question']}\n"
+                f"Correct answer: {q['correct_answer']}\n"
+                f"Student's answer: {student_answer}"
+            )),
+        ]
+        grade: Grade = grade_llm.invoke(messages)
+
+        if grade.correct:
+            correct_count += 1
+            print(f"  ✓ [{q['topic']}] correct")
+        else:
+            weak_topics.append(q["topic"])
+            print(f"  ✗ [{q['topic']}] {grade.feedback}")
+
+    print(f"\n[evaluate] scored {correct_count}/{len(state['quiz'])}")
+
+    return {
+        "weak_topics": weak_topics,
+        "retry_round": state.get("retry_round", 0) + 1,
+    }

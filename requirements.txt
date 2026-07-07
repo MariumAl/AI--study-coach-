@@ -1,5 +1,6 @@
 langchain
-langchain-google-genai
+langchain-ollama
 langgraph
+langgraph-checkpoint-sqlite
 pypdf
 python-dotenv
