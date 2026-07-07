@@ -36,6 +36,7 @@ formats ready).
 
 ## Run
 
+**CLI:**
 ```bash
 python run_stage1.py path/to/your_lecture.pdf summary
 python run_stage1.py path/to/your_lecture.pdf notes,flashcards
@@ -43,9 +44,17 @@ python run_stage1.py path/to/your_lecture.pdf quiz
 python run_stage1.py path/to/your_lecture.pdf summary,notes,flashcards,quiz
 ```
 
-Each PDF gets its own memory "thread" (by filename) — run the same PDF
-with `quiz` again later, and it'll pick up right where your weak topics
-left off.
+**Web UI (Streamlit):**
+```bash
+streamlit run app.py
+```
+Upload a PDF, pick which steps to generate, hit Run. If quiz is included,
+answer questions in the form that appears — same underlying graph as the
+CLI, just a different caller for the interrupt/resume cycle.
+
+Each PDF gets its own memory "thread" (by filename), in both the CLI and
+the web UI — run the same PDF again later with quiz included, and it
+picks up right where your weak topics left off.
 
 ## Roadmap
 - [x] Stage 1: read PDF → summarize / notes, conditional routing
@@ -54,4 +63,6 @@ left off.
       retry loop (the core agentic control-flow piece)
 - [x] Stage 4: persist state across sessions (SQLite checkpointer) — "quiz
       me" remembers weak chapters from previous runs
-- [ ] Next: a simple frontend for easier testing/demoing
+- [x] Stage 5: Streamlit frontend (uses `interrupt()`/`Command(resume=...)`
+      instead of `input()`, so the same graph works from a browser too)
+- [ ] Next: more features (TBD)

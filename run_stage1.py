@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from graph import graph
+from langgraph.types import Command
 
 VALID_STEPS = {"summary", "notes", "flashcards", "quiz"}
 
@@ -61,6 +62,20 @@ if __name__ == "__main__":
         {"file_path": pdf_path, "steps": steps, "retry_round": 0},
         config=config,
     )
+
+    # If the graph paused at ask_answers, result contains "__interrupt__"
+    # instead of the normal state. Keep resuming (collecting answers via
+    # input(), same as before) until it finishes for real — this can
+    # happen more than once, since evaluate can loop back to another
+    # quiz round, which pauses at ask_answers again.
+    while "__interrupt__" in result:
+        quiz_payload = result["__interrupt__"][0].value["quiz"]
+        print("\n--- QUIZ TIME ---")
+        answers = []
+        for i, q in enumerate(quiz_payload, start=1):
+            print(f"\n{i}. [{q['topic']}] {q['question']}")
+            answers.append(input("Your answer: "))
+        result = graph.invoke(Command(resume=answers), config=config)
 
     if result.get("summary"):
         print("\n--- SUMMARY ---\n")

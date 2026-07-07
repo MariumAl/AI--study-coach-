@@ -178,22 +178,21 @@ def make_quiz(state: CoachState) -> dict:
     return {"quiz": [q.model_dump() for q in result.questions]}
 
 
-def ask_answers(state: CoachState) -> dict:
-    """Collect the student's typed answers, one per quiz question.
+from langgraph.types import interrupt
 
-    This node uses plain input() — it just pauses the Python process and
-    waits for terminal input, same as any script would. This is fine for
-    a CLI learning project. Production chat apps use LangGraph's proper
-    human-in-the-loop mechanism (`interrupt()` + a checkpointer) instead,
-    which pauses a graph run and resumes it later, possibly across a
-    network request — worth knowing that exists, not needed here.
+
+def ask_answers(state: CoachState) -> dict:
+    """Pause the graph here and hand the quiz questions back to whatever
+    is calling it (CLI script or Streamlit app). Execution stops at this
+    exact point until the caller invokes the graph again with
+    Command(resume=<the student's answers>) — at which point `interrupt()`
+    below returns that value and the node continues.
+
+    This replaces the old input()-based version: input() only works in a
+    terminal, but interrupt() works the same way whether the caller is a
+    CLI script or a web UI — the node itself doesn't need to know which.
     """
-    print("\n--- QUIZ TIME ---")
-    answers = []
-    for i, q in enumerate(state["quiz"], start=1):
-        print(f"\n{i}. [{q['topic']}] {q['question']}")
-        answer = input("Your answer: ")
-        answers.append(answer)
+    answers = interrupt({"quiz": state["quiz"]})
     return {"answers": answers}
 
 
