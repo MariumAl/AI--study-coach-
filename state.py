@@ -28,3 +28,5 @@ class CoachState(TypedDict):
     answers: List[str]       # filled by ask_answers node — student's typed answers
     weak_topics: List[str]   # filled by evaluate node — topics the student got wrong
     retry_round: int         # how many times we've looped back for more practice
+    last_feedback: List[dict]  # filled by evaluate node — per-question grading detail,
+                                # so any frontend can display it (not just server print())

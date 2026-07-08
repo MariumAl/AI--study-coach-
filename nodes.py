@@ -214,8 +214,15 @@ def evaluate(state: CoachState) -> dict:
     """Grade every answer, and collect which TOPICS the student got wrong.
     This is the state that turns into 'memory' for the adaptive loop —
     make_quiz reads weak_topics on the next round to decide what to retest.
+
+    Feedback is built as a plain list of dicts and RETURNED as state, not
+    just printed. print() only reaches whatever terminal launched this
+    Python process — a Streamlit app's browser never sees it. Anything a
+    frontend needs to display has to travel through state, same as
+    everything else in this graph.
     """
     weak_topics = []
+    feedback_list = []
     correct_count = 0
 
     for q, student_answer in zip(state["quiz"], state["answers"]):
@@ -223,6 +230,11 @@ def evaluate(state: CoachState) -> dict:
         # empty answer — decide that deterministically in plain Python first.
         if not student_answer.strip():
             weak_topics.append(q["topic"])
+            feedback_list.append({
+                "topic": q["topic"], "question": q["question"],
+                "student_answer": student_answer, "correct": False,
+                "feedback": "No answer provided.",
+            })
             print(f"  ✗ [{q['topic']}] No answer provided.")
             continue
 
@@ -236,6 +248,12 @@ def evaluate(state: CoachState) -> dict:
         ]
         grade: Grade = grade_llm.invoke(messages)
 
+        feedback_list.append({
+            "topic": q["topic"], "question": q["question"],
+            "student_answer": student_answer, "correct": grade.correct,
+            "feedback": grade.feedback,
+        })
+
         if grade.correct:
             correct_count += 1
             print(f"  ✓ [{q['topic']}] correct")
@@ -248,4 +266,5 @@ def evaluate(state: CoachState) -> dict:
     return {
         "weak_topics": weak_topics,
         "retry_round": state.get("retry_round", 0) + 1,
+        "last_feedback": feedback_list,
     }
