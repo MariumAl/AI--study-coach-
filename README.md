@@ -65,4 +65,8 @@ picks up right where your weak topics left off.
       me" remembers weak chapters from previous runs
 - [x] Stage 5: Streamlit frontend (uses `interrupt()`/`Command(resume=...)`
       instead of `input()`, so the same graph works from a browser too)
+- [x] Stage 6: `make_notes` can autonomously call a web_search tool when the
+      slides mention a concept too briefly to write a clear note about it —
+      real tool-use agency inside a single node (same manual tool-loop
+      pattern as the very first stage1_plain_langchain.py experiment)
 - [ ] Next: more features (TBD)

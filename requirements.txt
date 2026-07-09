@@ -5,3 +5,4 @@ langgraph-checkpoint-sqlite
 pypdf
 python-dotenv
 streamlit
+duckduckgo_search

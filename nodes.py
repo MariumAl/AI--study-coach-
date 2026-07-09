@@ -13,8 +13,10 @@ import os
 from typing import List
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
+from duckduckgo_search import DDGS
+from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from state import CoachState
 
 # No API key needed — this talks to Ollama's local server (default
@@ -67,18 +69,62 @@ before an exam. Follow this exact structure:
 case, a formula, a term the slides emphasize) — only include this line if
 something genuinely stands out.
 
-Only use content in the source. Do not summarize or compress — this should
-be MORE detailed than the summary, not less."""
+The lecture slides are your PRIMARY source — base your notes on them, not
+on outside knowledge. However, if the slides mention a term, formula, or
+concept too briefly to write a clear, self-contained note about it (e.g.
+they name something without defining it, or use a term you're not fully
+sure about), you may call web_search to verify or clarify it before
+writing that note. Don't search for things the slides already explain
+clearly — only use it to fill a genuine gap. Do not summarize or compress
+— this should be MORE detailed than the summary, not less."""
+
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for a concept, term, or formula that the lecture
+    slides mention but don't fully explain. Returns a few short result
+    snippets. Use this ONLY to clarify something the source material left
+    unclear — not as a replacement for the lecture content itself."""
+    with DDGS() as ddgs:
+        results = list(ddgs.text(query, max_results=3))
+    if not results:
+        return "No results found."
+    return "\n\n".join(f"Title: {r['title']}\nSnippet: {r['body']}" for r in results)
+
+
+# A SEPARATE bound model for this node — bind_tools() only tells the model
+# what it's ALLOWED to call, it doesn't affect the plain `llm` used
+# elsewhere (summarize, flashcards, etc). Each node can give the model a
+# different set of capabilities.
+notes_llm = llm.bind_tools([web_search])
 
 
 def make_notes(state: CoachState) -> dict:
+    """Same manual tool-calling loop as stage1_plain_langchain.py: invoke
+    the model, check if it asked for a tool, run the tool ourselves if so,
+    feed the result back, repeat until it's ready to give a final answer.
+    The difference from Stage 1 is that this loop now lives inside ONE
+    node of a bigger graph, instead of being the entire program — this is
+    exactly how real agentic systems compose: small tool-using loops
+    nested inside a larger orchestrated pipeline.
+    """
     messages = [
         SystemMessage(content=NOTES_SYSTEM_PROMPT),
         HumanMessage(content=f"LECTURE CONTENT:\n{state['raw_text']}"),
     ]
-    response = llm.invoke(messages)
-    print("[make_notes] done")
-    return {"notes": response.content}
+
+    while True:
+        response = notes_llm.invoke(messages)
+        messages.append(response)
+
+        if not response.tool_calls:
+            print("[make_notes] done")
+            return {"notes": response.content}
+
+        for call in response.tool_calls:
+            print(f"[make_notes] model chose to search: {call['args'].get('query')}")
+            result = web_search.invoke(call["args"])
+            messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 
 
 # --- Structured output: flashcards -------------------------------------
