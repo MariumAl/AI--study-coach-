@@ -55,20 +55,28 @@ if __name__ == "__main__":
     thread_id = os.path.splitext(os.path.basename(pdf_path))[0]
     config = {"configurable": {"thread_id": thread_id}}
 
-    # retry_round=0 is passed explicitly to reset it for this fresh sitting.
-    # weak_topics is deliberately NOT passed here — leaving it out means
-    # whatever was last saved for this thread_id carries forward untouched.
+    # retry_round=0 and notes_reviewed=False reset both per-session limits
+    # for a fresh sitting. weak_topics is deliberately NOT passed here —
+    # leaving it out means whatever was last saved for this thread_id
+    # carries forward untouched.
     result = graph.invoke(
-        {"file_path": pdf_path, "steps": steps, "retry_round": 0},
+        {"file_path": pdf_path, "steps": steps, "retry_round": 0, "notes_reviewed": False},
         config=config,
     )
 
     # If the graph paused at ask_answers, result contains "__interrupt__"
-    # instead of the normal state. Keep resuming (collecting answers via
-    # input(), same as before) until it finishes for real — this can
-    # happen more than once, since evaluate can loop back to another
-    # quiz round, which pauses at ask_answers again.
+    # instead of the normal state. Keep resuming until it finishes for
+    # real — this can loop more than once, since the supervisor can send
+    # the student through review_notes before another quiz round.
+    last_shown_review = None
     while "__interrupt__" in result:
+        # The supervisor may have routed through review_notes before this
+        # round — show that focused re-explanation before the new quiz.
+        if result.get("focused_review") and result["focused_review"] != last_shown_review:
+            print("\n--- FOCUSED REVIEW (before retesting) ---\n")
+            print(result["focused_review"])
+            last_shown_review = result["focused_review"]
+
         quiz_payload = result["__interrupt__"][0].value["quiz"]
         print("\n--- QUIZ TIME ---")
         answers = []
@@ -94,6 +102,8 @@ if __name__ == "__main__":
     if "quiz" in steps:
         print("\n--- QUIZ RESULTS ---")
         print(f"Practice rounds this session: {result.get('retry_round', 0)}")
+        if result.get("supervisor_reasoning"):
+            print(f"Supervisor's call: {result['supervisor_reasoning']}")
         if result.get("weak_topics"):
             print(f"Still weak on: {', '.join(result['weak_topics'])} "
                   f"— saved to memory, next quiz session will retest these first.")

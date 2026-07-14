@@ -13,13 +13,22 @@ running "quiz me" again tomorrow remembers what you struggled with today.
 read_pdf → [optional: summarize] → [optional: make_notes]
          → [optional: flashcards] → [optional: quiz]
 
-quiz → ask_answers → evaluate → (loop back to quiz if weak topics remain,
-                                  up to 2 retry rounds) → end
+quiz → ask_answers → evaluate → supervisor → retest (loop to quiz)
+                                            → review_notes (then loop to quiz)
+                                            → done
 ```
 
 Which steps run is controlled entirely at runtime (no code edits) via a
 comma-separated `steps` argument: `summary`, `notes`, `flashcards`, `quiz`,
 in any combination. LangGraph conditional edges decide the routing.
+
+### Multi-agent design
+Three specialist agents, each tuned differently for its role, coordinated
+by a supervisor:
+- **Quiz Writer** — warmer temperature (0.7) for varied question phrasing
+- **Grader** — cold (0), LLM-as-judge grading of free-text answers against meaning, not exact wording
+- **Notes Reviewer** — cold (0), a focused re-explanation of only the topics the student got wrong
+- **Supervisor** — decides whether to retest directly or route through the Notes Reviewer first, based on whether this is a repeat miss. A hard retry cap (2 rounds) and a no-repeat-review guardrail are enforced in plain Python underneath the supervisor's judgment — the LLM chooses strategy, but never overrides the safety limits.
 
 ## Setup
 
@@ -69,4 +78,7 @@ picks up right where your weak topics left off.
       slides mention a concept too briefly to write a clear note about it —
       real tool-use agency inside a single node (same manual tool-loop
       pattern as the very first stage1_plain_langchain.py experiment)
+- [x] Stage 7: multi-agent — a Supervisor coordinates the Quiz Writer,
+      Grader, and a new Notes Reviewer specialist, each with distinct
+      tuning/roles, with deterministic guardrails under the LLM's choices
 - [ ] Next: more features (TBD)

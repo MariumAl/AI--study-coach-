@@ -24,6 +24,14 @@ from state import CoachState
 # the graph, or you'll get a connection error, not an auth error.
 llm = ChatOllama(model="qwen2.5:7b", temperature=0)
 
+# A SECOND instance, same model, but warmer. This is the Quiz Writer
+# agent's model: higher temperature means more varied, less repetitive
+# question phrasing each time it's asked. The Grader and Supervisor stay
+# on the cold `llm` above — consistency matters more than variety for
+# judgment calls, but variety helps for content generation. This is the
+# kind of per-role tuning a single shared model can't give you.
+creative_llm = ChatOllama(model="qwen2.5:7b", temperature=0.7)
+
 
 def read_pdf(state: CoachState) -> dict:
     reader = PdfReader(state["file_path"])
@@ -184,7 +192,7 @@ class QuizSet(BaseModel):
     questions: List[QuizQuestion]
 
 
-quiz_llm = llm.with_structured_output(QuizSet)
+quiz_llm = creative_llm.with_structured_output(QuizSet)
 
 QUIZ_SYSTEM_PROMPT = """You are a study coach creating quiz questions from \
 lecture slides. Each question needs a concise, gradable correct_answer (a \
@@ -314,3 +322,104 @@ def evaluate(state: CoachState) -> dict:
         "retry_round": state.get("retry_round", 0) + 1,
         "last_feedback": feedback_list,
     }
+
+
+# --- MULTI-AGENT: the Supervisor -----------------------------------------
+# Everything above is one specialist agent per node. The Supervisor's job
+# is different in kind: it doesn't produce study content, it decides which
+# specialist should act NEXT, based on the situation. This is what makes
+# the system multi-agent rather than just multi-prompt — a coordinator
+# making a genuine judgment call, not a fixed sequence.
+#
+# MAX_RETRY_ROUNDS is enforced here in plain Python, BEFORE the supervisor
+# is even asked. This is a deliberate design choice: the hard safety limit
+# should never depend on the model choosing to respect it — it's checked
+# deterministically, and the supervisor is only consulted for the parts
+# where a genuine judgment call is appropriate.
+MAX_RETRY_ROUNDS = 2
+
+
+class SupervisorDecision(BaseModel):
+    action: str = Field(
+        description='Must be exactly one of: "retest", "review_notes"'
+    )
+    reasoning: str = Field(description="One sentence explaining the choice")
+
+
+supervisor_llm = llm.with_structured_output(SupervisorDecision)
+
+SUPERVISOR_SYSTEM_PROMPT = """You are a tutoring supervisor. You coordinate \
+two specialist agents and must choose which one acts next:
+
+- "retest": send the student straight back to the Quiz Writer for more
+  practice questions on their weak topics.
+- "review_notes": send the student to the Notes Reviewer FIRST, for a
+  focused re-explanation of their weak topics, before testing again.
+
+Choose "review_notes" if the student has been wrong on the same topic(s)
+before (this isn't their first miss) AND notes haven't already been
+reviewed this session — a fresh explanation is more useful than blindly
+re-testing something they may not understand yet. Otherwise choose
+"retest". Never choose "review_notes" twice in one session."""
+
+
+def supervisor(state: CoachState) -> dict:
+    weak_topics = state.get("weak_topics") or []
+    retry_round = state.get("retry_round", 0)
+
+    # Deterministic hard stop — the LLM never gets a vote on this part.
+    if not weak_topics or retry_round >= MAX_RETRY_ROUNDS:
+        reason = (
+            "No weak topics remain." if not weak_topics
+            else f"Hit the {MAX_RETRY_ROUNDS}-round practice cap."
+        )
+        print(f"[supervisor] done — {reason}")
+        return {"next_action": "done", "supervisor_reasoning": reason}
+
+    # Only consult the LLM when there's a genuine strategic choice to make.
+    messages = [
+        SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            f"Weak topics: {', '.join(weak_topics)}\n"
+            f"Retry round so far: {retry_round}\n"
+            f"Notes already reviewed this session: {state.get('notes_reviewed', False)}"
+        )),
+    ]
+    decision: SupervisorDecision = supervisor_llm.invoke(messages)
+    action = decision.action if decision.action in ("retest", "review_notes") else "retest"
+
+    # Deterministic guardrail on top of the LLM's choice: never allow
+    # review_notes twice in one session, even if the model picks it anyway.
+    if action == "review_notes" and state.get("notes_reviewed"):
+        print("[supervisor] model chose review_notes again — overriding to retest")
+        action = "retest"
+
+    print(f"[supervisor] decided: {action} — {decision.reasoning}")
+    return {"next_action": action, "supervisor_reasoning": decision.reasoning}
+
+
+# --- MULTI-AGENT: the Notes Reviewer specialist --------------------------
+# A second specialist, only invoked when the Supervisor delegates to it.
+# Same model family as make_notes, but narrowly focused and using the
+# cold `llm` (a review should be precise, not creative).
+
+REVIEW_SYSTEM_PROMPT = """You are a study coach giving a focused, clear
+re-explanation of specific topics a student just got wrong on a quiz.
+Do NOT cover anything else — only the listed weak topics. For each topic:
+explain the core idea in plain language (2-4 sentences), as if explaining
+it for the first time to someone who was confused, not just restating the
+original slide content. Base it on the lecture content provided."""
+
+
+def review_notes(state: CoachState) -> dict:
+    topic_list = ", ".join(state.get("weak_topics") or [])
+    messages = [
+        SystemMessage(content=REVIEW_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            f"Weak topics to re-explain: {topic_list}\n\n"
+            f"LECTURE CONTENT:\n{state['raw_text']}"
+        )),
+    ]
+    response = llm.invoke(messages)
+    print(f"[review_notes] wrote a focused review for: {topic_list}")
+    return {"focused_review": response.content, "notes_reviewed": True}

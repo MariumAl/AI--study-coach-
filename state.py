@@ -30,3 +30,9 @@ class CoachState(TypedDict):
     retry_round: int         # how many times we've looped back for more practice
     last_feedback: List[dict]  # filled by evaluate node — per-question grading detail,
                                 # so any frontend can display it (not just server print())
+    next_action: str            # filled by supervisor node — "retest" / "review_notes" / "done"
+    supervisor_reasoning: str   # filled by supervisor node — why it chose that action
+    notes_reviewed: bool        # whether review_notes has already run this session
+                                 # (prevents the supervisor looping on that specialist forever)
+    focused_review: str         # filled by review_notes node — targeted re-explanation
+                                 # of weak topics only, shown before the next quiz round

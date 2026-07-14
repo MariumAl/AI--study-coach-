@@ -57,7 +57,7 @@ if uploaded_file and st.button("Run", type="primary"):
 
     with st.spinner("Thinking..."):
         result = graph.invoke(
-            {"file_path": pdf_path, "steps": steps, "retry_round": 0},
+            {"file_path": pdf_path, "steps": steps, "retry_round": 0, "notes_reviewed": False},
             config=config,
         )
     st.session_state.result = result
@@ -99,6 +99,11 @@ if result and result.get("last_feedback"):
             if not item["correct"]:
                 st.caption(f"Feedback: {item['feedback']}")
 
+# --- Notes Reviewer specialist output, if the supervisor delegated to it -
+if result and result.get("focused_review"):
+    with st.expander("🔍 Focused Review (before retesting)", expanded=True):
+        st.markdown(result["focused_review"])
+
 # --- quiz: either paused waiting for answers, or finished with results ---
 if result and "__interrupt__" in result:
     quiz_payload = result["__interrupt__"][0].value["quiz"]
@@ -107,6 +112,8 @@ if result and "__interrupt__" in result:
     upcoming_round = result.get("retry_round", 0) + 1
     label = "Quiz Time" if upcoming_round == 1 else f"Round {upcoming_round} — Adaptive Retest"
     st.subheader(f"📝 {label}")
+    if result.get("supervisor_reasoning"):
+        st.caption(f"🧑‍🏫 Supervisor: {result['supervisor_reasoning']}")
 
     # Keying widgets by round number (not just question index) means a new
     # round never accidentally reuses a previous round's leftover widget
@@ -129,6 +136,8 @@ if result and "__interrupt__" in result:
 elif result and "quiz" in steps and "retry_round" in result:
     st.subheader("🎯 Final Quiz Results")
     st.write(f"Practice rounds this session: {result.get('retry_round', 0)}")
+    if result.get("supervisor_reasoning"):
+        st.caption(f"🧑‍🏫 Supervisor: {result['supervisor_reasoning']}")
     if result.get("weak_topics"):
         st.warning(
             f"Still weak on: {', '.join(result['weak_topics'])} — "

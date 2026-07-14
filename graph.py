@@ -1,26 +1,25 @@
 """
 GRAPH — this is the only file that actually touches the LangGraph API.
 
-New in this stage: a CYCLE. Every edge so far only ever moved forward
-(skip a stage, but never go back). Now:
+MULTI-AGENT, added in this stage:
 
-    quiz -> ask_answers -> evaluate -> (loop back to quiz, OR end)
+    quiz -> ask_answers -> evaluate -> supervisor -> (retest | review_notes | done)
 
-That loop-back is decided by route_after_evaluate(), based on state the
-graph itself produced (weak_topics) — not something the user typed in.
-This is the actual "agentic" mechanic: the system observes its own
-output and decides whether to keep going.
+evaluate no longer decides the loop-back itself. It hands off to a
+SUPERVISOR node, which is a genuine second decision-maker: it looks at the
+same state (weak_topics, retry_round) and chooses between delegating to
+the Quiz Writer again ("retest") or the Notes Reviewer specialist
+("review_notes") first. That choice is an LLM call (supervisor_llm in
+nodes.py) wrapped in a deterministic hard-stop check — the retry cap is
+enforced in plain Python BEFORE the supervisor is even asked, so the
+safety limit never depends on the model's judgment.
 
-MAX_RETRY_ROUNDS exists so a stubborn weak topic can't loop forever —
-every loop in an agent needs a hard stop condition.
+review_notes always loops back to quiz once it's done — it's a detour
+before more testing, not an endpoint.
 
-ALSO new: a CHECKPOINTER. Without one, state only exists for the duration
-of a single .invoke() call — close the program and it's gone. A
-checkpointer saves the state to disk (here, a local SQLite file) after
-every node runs, keyed by a "thread_id" you choose. Invoke the graph again
-later with the SAME thread_id, and any fields you don't explicitly
-overwrite carry over from where they left off — that's how "quiz me
-tomorrow" can remember today's weak topics without you re-supplying them.
+Everything from earlier stages (the CYCLE, the CHECKPOINTER) still
+applies exactly as before — this stage adds a second kind of decision
+point (a coordinator agent), not a new mechanic.
 """
 
 import sqlite3
@@ -29,10 +28,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from state import CoachState
 from nodes import (
     read_pdf, summarize, make_notes, make_flashcards,
-    make_quiz, ask_answers, evaluate,
+    make_quiz, ask_answers, evaluate, supervisor, review_notes,
 )
-
-MAX_RETRY_ROUNDS = 2
 
 
 def route_to_quiz_or_end(state: CoachState) -> str:
@@ -59,15 +56,12 @@ def route_to_summary_or_past(state: CoachState) -> str:
     return route_to_notes_or_past(state)
 
 
-def route_after_evaluate(state: CoachState) -> str:
-    """The loop-back decision. Keep practicing if: there ARE weak topics,
-    AND we haven't hit the retry cap yet. Otherwise, stop."""
-    still_weak = bool(state.get("weak_topics"))
-    rounds_left = state.get("retry_round", 0) < MAX_RETRY_ROUNDS
-
-    if still_weak and rounds_left:
-        return "quiz"  # loop back — generate more questions on weak topics
-    return "end"
+def route_after_supervisor(state: CoachState) -> str:
+    """Just look up what the supervisor already decided — the JUDGMENT
+    happened inside the supervisor node itself (LLM call + hard-stop
+    check). This router is deliberately dumb; it only reads the answer."""
+    action = state.get("next_action", "done")
+    return {"retest": "quiz", "review_notes": "review_notes"}.get(action, "end")
 
 
 graph_builder = StateGraph(CoachState)
@@ -79,6 +73,8 @@ graph_builder.add_node("flashcards", make_flashcards)
 graph_builder.add_node("quiz", make_quiz)
 graph_builder.add_node("ask_answers", ask_answers)
 graph_builder.add_node("evaluate", evaluate)
+graph_builder.add_node("supervisor", supervisor)
+graph_builder.add_node("review_notes", review_notes)
 
 graph_builder.add_edge(START, "read_pdf")
 
@@ -108,16 +104,20 @@ graph_builder.add_conditional_edges(
     {"quiz": "quiz", "end": END},
 )
 
-# quiz -> ask_answers -> evaluate is always a fixed sequence...
+# quiz -> ask_answers -> evaluate -> supervisor is always a fixed sequence...
 graph_builder.add_edge("quiz", "ask_answers")
 graph_builder.add_edge("ask_answers", "evaluate")
+graph_builder.add_edge("evaluate", "supervisor")
 
-# ...but evaluate's next step is a DECISION: loop back to quiz, or stop.
+# ...but the supervisor's next step is a genuine multi-way decision.
 graph_builder.add_conditional_edges(
-    "evaluate",
-    route_after_evaluate,
-    {"quiz": "quiz", "end": END},
+    "supervisor",
+    route_after_supervisor,
+    {"quiz": "quiz", "review_notes": "review_notes", "end": END},
 )
+
+# review_notes is always a detour back into another quiz round.
+graph_builder.add_edge("review_notes", "quiz")
 
 conn = sqlite3.connect("study_coach_memory.sqlite", check_same_thread=False)
 checkpointer = SqliteSaver(conn)
